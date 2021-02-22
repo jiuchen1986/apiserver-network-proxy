@@ -17,13 +17,13 @@ limitations under the License.
 package main
 
 import (
-	"crypto/tls"
 	"flag"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -66,9 +66,9 @@ type GrpcProxyAgentOptions struct {
 	agentKey  string
 	caCert    string
 
-	// Configuration for connecting to the proxy-server
-	proxyServerHost string
-	proxyServerPort int
+	// Configuration for connecting to the proxy-servers
+	// Endpoints are specified as an array of "host:port" splitted by comma
+	proxyServerEndpoints string
 
 	// Ports for the health and admin server
 	healthServerPort int
@@ -83,9 +83,28 @@ type GrpcProxyAgentOptions struct {
 	serviceAccountTokenPath string
 }
 
-func (o *GrpcProxyAgentOptions) ClientSetConfig(dialOptions ...grpc.DialOption) *agent.ClientSetConfig {
+// ClientSetConfigs returns a slice of ClientSetConfig for building multiple ClientSet connecting to different proxy-servers
+// TLS are configured here, so no TLS related options should be input
+func (o *GrpcProxyAgentOptions) ClientSetConfigs(dialOptions ...grpc.DialOption) ([]*agent.ClientSetConfig, error) {
+	endpoints := strings.Split(o.proxyServerEndpoints, ",")
+	csConfigs := []*agent.ClientSetConfig{}
+
+	for _, ep := range endpoints {
+		tokens := strings.Split(ep, ":")
+		if tlsConfig, err := util.GetClientTLSConfig(o.caCert, o.agentCert, o.agentKey, tokens[0]); err == nil {
+			dialOption := grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
+			csConfigs = append(csConfigs, o.clientSetConfig(tokens[0], tokens[1], append(dialOptions, dialOption)...))
+		} else {
+			return nil, err
+		}
+	}
+
+	return csConfigs, nil
+}
+
+func (o *GrpcProxyAgentOptions) clientSetConfig(serverHost, serverPort string, dialOptions ...grpc.DialOption) *agent.ClientSetConfig {
 	return &agent.ClientSetConfig{
-		Address:                 fmt.Sprintf("%s:%d", o.proxyServerHost, o.proxyServerPort),
+		Address:                 fmt.Sprintf("%s:%s", serverHost, serverPort),
 		AgentID:                 o.agentID,
 		AgentIdentifiers:        o.agentIdentifiers,
 		SyncInterval:            o.syncInterval,
@@ -100,8 +119,7 @@ func (o *GrpcProxyAgentOptions) Flags() *pflag.FlagSet {
 	flags.StringVar(&o.agentCert, "agent-cert", o.agentCert, "If non-empty secure communication with this cert.")
 	flags.StringVar(&o.agentKey, "agent-key", o.agentKey, "If non-empty secure communication with this key.")
 	flags.StringVar(&o.caCert, "ca-cert", o.caCert, "If non-empty the CAs we use to validate clients.")
-	flags.StringVar(&o.proxyServerHost, "proxy-server-host", o.proxyServerHost, "The hostname to use to connect to the proxy-server.")
-	flags.IntVar(&o.proxyServerPort, "proxy-server-port", o.proxyServerPort, "The port the proxy server is listening on.")
+	flags.StringVar(&o.proxyServerEndpoints, "proxy-server-endpoints", o.proxyServerEndpoints, "The endpoints to use to connect to the proxy-servers as an array of \"host:port\" splitted by comma.")
 	flags.IntVar(&o.healthServerPort, "health-server-port", o.healthServerPort, "The port the health server is listening on.")
 	flags.IntVar(&o.adminServerPort, "admin-server-port", o.adminServerPort, "The port the admin server is listening on.")
 	flags.StringVar(&o.agentID, "agent-id", o.agentID, "The unique ID of this agent. Default to a generated uuid if not set.")
@@ -116,8 +134,7 @@ func (o *GrpcProxyAgentOptions) Print() {
 	klog.V(1).Infof("AgentCert set to %q.\n", o.agentCert)
 	klog.V(1).Infof("AgentKey set to %q.\n", o.agentKey)
 	klog.V(1).Infof("CACert set to %q.\n", o.caCert)
-	klog.V(1).Infof("ProxyServerHost set to %q.\n", o.proxyServerHost)
-	klog.V(1).Infof("ProxyServerPort set to %d.\n", o.proxyServerPort)
+	klog.V(1).Infof("ProxyServerEndpoints set to %q.\n", o.proxyServerEndpoints)
 	klog.V(1).Infof("HealthServerPort set to %d.\n", o.healthServerPort)
 	klog.V(1).Infof("AdminServerPort set to %d.\n", o.adminServerPort)
 	klog.V(1).Infof("AgentID set to %s.\n", o.agentID)
@@ -125,6 +142,20 @@ func (o *GrpcProxyAgentOptions) Print() {
 	klog.V(1).Infof("ProbeInterval set to %v.\n", o.probeInterval)
 	klog.V(1).Infof("ServiceAccountTokenPath set to %q.\n", o.serviceAccountTokenPath)
 	klog.V(1).Infof("AgentIdentifiers set to %s.\n", util.PrettyPrintURL(o.agentIdentifiers))
+}
+
+func validateEndpoints(endpoints string) bool {
+	eps := strings.Split(endpoints, ",")
+	if len(eps) == 0 {
+		return false
+	}
+	for _, ep := range eps {
+		tokens := strings.Split(ep, ":")
+		if len(tokens) != 2 {
+			return false
+		}
+	}
+	return true
 }
 
 func (o *GrpcProxyAgentOptions) Validate() error {
@@ -149,8 +180,8 @@ func (o *GrpcProxyAgentOptions) Validate() error {
 			return fmt.Errorf("error checking agent CA cert %s, got %v", o.caCert, err)
 		}
 	}
-	if o.proxyServerPort <= 0 {
-		return fmt.Errorf("proxy server port %d must be greater than 0", o.proxyServerPort)
+	if !validateEndpoints(o.proxyServerEndpoints) {
+		return fmt.Errorf("proxy server endpoints must be in format of \"host1:port1,host2:port2,...\", got %s", o.proxyServerEndpoints)
 	}
 	if o.healthServerPort <= 0 {
 		return fmt.Errorf("health server port %d must be greater than 0", o.healthServerPort)
@@ -193,8 +224,7 @@ func newGrpcProxyAgentOptions() *GrpcProxyAgentOptions {
 		agentCert:               "",
 		agentKey:                "",
 		caCert:                  "",
-		proxyServerHost:         "127.0.0.1",
-		proxyServerPort:         8091,
+		proxyServerEndpoints:    "127.0.0.1:8091",
 		healthServerPort:        8093,
 		adminServerPort:         8094,
 		agentID:                 uuid.New().String(),
@@ -246,15 +276,13 @@ func (a *Agent) run(o *GrpcProxyAgentOptions) error {
 }
 
 func (a *Agent) runProxyConnection(o *GrpcProxyAgentOptions, stopCh <-chan struct{}) error {
-	var tlsConfig *tls.Config
-	var err error
-	if tlsConfig, err = util.GetClientTLSConfig(o.caCert, o.agentCert, o.agentKey, o.proxyServerHost); err != nil {
+	if csConfigs, err := o.ClientSetConfigs(); err == nil {
+		for _, cc := range csConfigs {
+			cc.NewAgentClientSet(stopCh).Serve()
+		}
+	} else {
 		return err
 	}
-	dialOption := grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
-	cc := o.ClientSetConfig(dialOption)
-	cs := cc.NewAgentClientSet(stopCh)
-	cs.Serve()
 
 	return nil
 }

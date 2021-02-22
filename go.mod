@@ -11,6 +11,7 @@ require (
 	github.com/spf13/cobra v0.0.3
 	github.com/spf13/pflag v1.0.5
 	google.golang.org/grpc v1.27.0
+	google.golang.org/protobuf v1.23.0
 	k8s.io/api v0.17.1
 	k8s.io/apimachinery v0.17.1
 	k8s.io/client-go v0.17.1

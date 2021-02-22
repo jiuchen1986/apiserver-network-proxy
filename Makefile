@@ -92,12 +92,12 @@ lint:
 gen: proto/agent/agent.pb.go konnectivity-client/proto/client/client.pb.go mock_gen
 
 konnectivity-client/proto/client/client.pb.go: konnectivity-client/proto/client/client.proto
-	protoc -I . konnectivity-client/proto/client/client.proto --go_out=plugins=grpc:${GOPATH}/src
+	protoc -I . konnectivity-client/proto/client/client.proto --go_out=plugins=grpc:. --go_opt=paths=source_relative
 	cat hack/go-license-header.txt konnectivity-client/proto/client/client.pb.go > konnectivity-client/proto/client/client.licensed.go
 	mv konnectivity-client/proto/client/client.licensed.go konnectivity-client/proto/client/client.pb.go
 
 proto/agent/agent.pb.go: proto/agent/agent.proto
-	protoc -I . proto/agent/agent.proto --go_out=plugins=grpc:${GOPATH}/src
+	protoc -I . proto/agent/agent.proto --go_out=plugins=grpc:. --go_opt=paths=source_relative
 	cat hack/go-license-header.txt proto/agent/agent.pb.go > proto/agent/agent.licensed.go
 	mv proto/agent/agent.licensed.go proto/agent/agent.pb.go
 
